@@ -19,6 +19,11 @@ const TOKEN_PERMISSION_HINT := "[color=yellow]A 403 error means your token does 
 	+ "classic token with the 'repo' scope instead of a fine-grained token. " \
 	+ "See the README for details.[/color]"
 
+# Auto-push mode constants.
+const AUTO_PUSH_MANUAL := 0
+const AUTO_PUSH_ON_SAVE := 1
+const AUTO_PUSH_ON_CLOSE := 2
+
 # --- UI references ---
 var _role_option: OptionButton
 var _org_input: LineEdit
@@ -101,9 +106,9 @@ func _build_ui() -> void:
 
 	_add_label(vbox, "Auto-Push:")
 	_auto_push_option = OptionButton.new()
-	_auto_push_option.add_item("Manual Only", 0)
-	_auto_push_option.add_item("Auto-Push on Save", 1)
-	_auto_push_option.add_item("Auto-Push on Close", 2)
+	_auto_push_option.add_item("Manual Only", AUTO_PUSH_MANUAL)
+	_auto_push_option.add_item("Auto-Push on Save", AUTO_PUSH_ON_SAVE)
+	_auto_push_option.add_item("Auto-Push on Close", AUTO_PUSH_ON_CLOSE)
 	_auto_push_option.tooltip_text = "Automatically push changes when saving the project or closing the editor."
 	_auto_push_option.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	vbox.add_child(_auto_push_option)
@@ -665,13 +670,13 @@ func _do_load_repos(org: String) -> void:
 
 ## Called by the plugin when the editor saves external data (project save).
 func _on_editor_save() -> void:
-	if _auto_push_option.selected == 1 and not _is_pushing:
+	if _auto_push_option.selected == AUTO_PUSH_ON_SAVE and not _is_pushing:
 		_trigger_auto_push()
 
 
 ## Called by the plugin when the editor is about to close.
 func _on_editor_close() -> void:
-	if _auto_push_option.selected == 2 and not _is_pushing:
+	if _auto_push_option.selected == AUTO_PUSH_ON_CLOSE and not _is_pushing:
 		_trigger_auto_push()
 
 

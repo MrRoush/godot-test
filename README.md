@@ -105,6 +105,8 @@ Instead of manually clicking **Push**, you can configure the addon to push autom
 
 > **Tip:** When auto-push is enabled and no commit message is entered, a default message with the current date and time is used automatically.
 
+> **Verifying your push:** You can always check whether your latest changes made it to GitHub by visiting your repository on [github.com](https://github.com) and looking at the most recent commit. If an auto-push on close was interrupted, simply reopen the project and push manually.
+
 ---
 
 ## Teacher / Student Roles and Classroom Repo Browser
