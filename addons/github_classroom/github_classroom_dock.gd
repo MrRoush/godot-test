@@ -714,7 +714,7 @@ func _populate_teacher_tree() -> void:
 	var folder_items := {}  # assignment_name -> TreeItem
 	for assignment_name in assignment_order:
 		var folder := _repo_tree.create_item(root)
-		folder.set_text(0, assignment_name + "  (" + str(prefix_counts[assignment_name]) + ")")
+		folder.set_text(0, assignment_name + " (" + str(prefix_counts[assignment_name]) + ")")
 		folder.set_selectable(0, false)
 		folder.collapsed = true
 		folder_items[assignment_name] = folder
@@ -723,7 +723,7 @@ func _populate_teacher_tree() -> void:
 		var repo_name: String = str(_loaded_repos[idx].name)
 		var assignment: String = assignment_for_repo[idx]
 		if assignment != "":
-			var student_label: String = repo_name.substr(assignment.length() + 1)
+			var student_label: String = repo_name.substr(assignment.length() + 1)  # +1 skips the "-" separator
 			var child := _repo_tree.create_item(folder_items[assignment])
 			child.set_text(0, student_label)
 			child.set_tooltip_text(0, repo_name)
