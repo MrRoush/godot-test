@@ -654,7 +654,7 @@ func _do_oauth_device_flow(client_id: String) -> void:
 
 	# Step 1 — ask GitHub for a device code.
 	_set_status("⏳ [color=yellow]Starting sign-in with GitHub...[/color]")
-	var code_result := await _api.request_device_code(client_id)
+	var code_result: Dictionary = await _api.request_device_code(client_id)
 
 	if not _oauth_polling:
 		_cleanup_oauth_ui()
