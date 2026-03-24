@@ -7,6 +7,9 @@ extends Control
 
 # CONFIG_PATH is now per-OS-user; see _get_config_path() below.
 
+# Teacher-baked classroom config (committed to the template project repo).
+const _CLASSROOM_CONFIG_PATH := "res://addons/github_classroom/classroom_config.cfg"
+
 # Directories to skip when scanning/downloading project files.
 const EXCLUDED_DIRS := [".godot", ".git"]
 
@@ -30,9 +33,11 @@ var _org_input: LineEdit
 var _repo_url_input: LineEdit
 var _token_input: LineEdit
 var _branch_input: LineEdit
+var _client_id_input: LineEdit
 var _auto_push_option: OptionButton
 var _save_button: Button
 var _sign_out_button: Button
+var _sign_in_button: Button
 var _load_repos_button: Button
 var _repo_tree: Tree
 var _commit_msg_input: TextEdit
@@ -45,6 +50,9 @@ var _connected_label: Label
 var _last_saved_label: Label
 var _advanced_nodes: Array = []
 var _pull_confirm_dialog: ConfirmationDialog
+var _auto_push_mode_label: Label
+var _clean_pull_button: Button
+var _clean_pull_confirm_dialog: ConfirmationDialog
 
 # --- API node ---
 var _api: Node
@@ -53,6 +61,11 @@ var _api: Node
 var _github_username: String = ""
 var _is_pushing: bool = false
 var _loaded_repos: Array = []
+var _config_load_error: bool = false
+var _oauth_polling: bool = false
+# True when the OAuth Client ID was baked in via classroom_config.cfg.
+# Prevents _save_settings() from overwriting the teacher-supplied value.
+var _classroom_config_locked: bool = false
 
 
 # ===========================================================================
@@ -62,12 +75,20 @@ var _loaded_repos: Array = []
 func _ready() -> void:
 	_build_ui()
 	_setup_api()
+	_load_classroom_config()
 	_load_settings()
 	# Connect token-change signal after loading so it does not fire during init.
 	_token_input.text_changed.connect(_on_token_changed)
-	# First-run detection: show a welcome message if no token is configured yet.
-	if _token_input.text.strip_edges().is_empty():
-		_set_status("ℹ️ Welcome! Enter your GitHub Token and Organization above, then click Save Settings and Load My Assignments.")
+	# Update sign-in button visibility when the client_id field is edited.
+	_client_id_input.text_changed.connect(func(_t: String) -> void: _update_sign_in_button_visibility())
+	# Show a context-appropriate status message on startup.
+	if _config_load_error:
+		_set_status("⚠️ [color=yellow]Settings file could not be read and has been reset. Please re-enter your settings and click Save Settings.[/color]")
+	elif _token_input.text.strip_edges().is_empty():
+		if _classroom_config_locked or not _client_id_input.text.strip_edges().is_empty():
+			_set_status("ℹ️ Welcome! Click 'Sign in with GitHub' to get started, then click Load My Assignments.")
+		else:
+			_set_status("ℹ️ Welcome! Use 'Show Advanced Options' to enter a GitHub Token, or ask your teacher to pre-configure the OAuth Client ID.")
 
 
 # ===========================================================================
@@ -113,16 +134,30 @@ func _build_ui() -> void:
 	_repo_url_input.tooltip_text = "Paste the repository link from GitHub Classroom here, or select one from the Classroom section below."
 	_advanced_nodes.append_array([repo_url_label, _repo_url_input])
 
-	_add_label(vbox, "GitHub Token:")
+	var token_label := _add_label(vbox, "GitHub Token:")
 	_token_input = _add_line_edit(vbox, "ghp_xxxxxxxxxxxx")
 	_token_input.secret = true
-	_token_input.tooltip_text = "Your GitHub Personal Access Token (starts with ghp_ or github_pat_)."
+	_token_input.tooltip_text = "Your GitHub Personal Access Token (ghp_… or github_pat_…), or an OAuth token (gho_…) obtained via Sign in with GitHub."
+	_advanced_nodes.append_array([token_label, _token_input])
+
+	_sign_in_button = Button.new()
+	_sign_in_button.text = "🔑 Sign in with GitHub"
+	_sign_in_button.tooltip_text = "Sign in using GitHub OAuth — no manual token needed. Requires an OAuth Client ID set by your teacher in the project template."
+	_sign_in_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_sign_in_button.pressed.connect(_on_sign_in_pressed)
+	_sign_in_button.visible = false  # shown only when an OAuth Client ID is configured
+	vbox.add_child(_sign_in_button)
 
 	var branch_label := _add_label(vbox, "Branch:")
 	_branch_input = _add_line_edit(vbox, "main")
 	_branch_input.text = "main"
 	_branch_input.tooltip_text = "Usually 'main'. Only change this if your teacher tells you to."
 	_advanced_nodes.append_array([branch_label, _branch_input])
+
+	var client_id_label := _add_label(vbox, "OAuth Client ID:")
+	_client_id_input = _add_line_edit(vbox, "Ov23liXXXXXXXXXXXXXX")
+	_client_id_input.tooltip_text = "GitHub OAuth App Client ID (starts with Ov23li…). Set once by the teacher in the template project. Students then use 'Sign in with GitHub' instead of a manual token."
+	_advanced_nodes.append_array([client_id_label, _client_id_input])
 
 	var auto_push_label := _add_label(vbox, "Auto-Push:")
 	_auto_push_option = OptionButton.new()
@@ -132,6 +167,7 @@ func _build_ui() -> void:
 	_auto_push_option.tooltip_text = "Automatically push changes when saving the project or closing the editor."
 	_auto_push_option.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	vbox.add_child(_auto_push_option)
+	_auto_push_option.item_selected.connect(_on_auto_push_option_changed)
 	_advanced_nodes.append_array([auto_push_label, _auto_push_option])
 
 	_save_button = Button.new()
@@ -208,6 +244,18 @@ func _build_ui() -> void:
 	_last_saved_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	vbox.add_child(_last_saved_label)
 
+	_auto_push_mode_label = Label.new()
+	_auto_push_mode_label.text = ""
+	_auto_push_mode_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	vbox.add_child(_auto_push_mode_label)
+
+	_clean_pull_button = Button.new()
+	_clean_pull_button.text = "🗑️ Clean Pull (Replace All Files)"
+	_clean_pull_button.tooltip_text = "Delete all local project files (keeping the addons folder) and download a fresh copy from GitHub. Use this when grading or switching student projects."
+	_clean_pull_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_clean_pull_button.pressed.connect(_on_clean_pull_pressed)
+	vbox.add_child(_clean_pull_button)
+
 	vbox.add_child(HSeparator.new())
 
 	# ---- Progress / Status section ----
@@ -236,6 +284,14 @@ func _build_ui() -> void:
 	_pull_confirm_dialog.ok_button_text = "Yes, Download"
 	_pull_confirm_dialog.confirmed.connect(_on_pull_confirmed)
 	add_child(_pull_confirm_dialog)
+
+	# Clean pull confirmation dialog (destructive – stronger warning).
+	_clean_pull_confirm_dialog = ConfirmationDialog.new()
+	_clean_pull_confirm_dialog.title = "Replace All Project Files?"
+	_clean_pull_confirm_dialog.dialog_text = "This will DELETE all local project files (except the addons folder) and replace them with the latest version from GitHub.\n\nFiles that have NOT been pushed to GitHub will be permanently lost.\n\nThis cannot be undone. Continue?"
+	_clean_pull_confirm_dialog.ok_button_text = "Yes, Replace All Files"
+	_clean_pull_confirm_dialog.confirmed.connect(_on_clean_pull_confirmed)
+	add_child(_clean_pull_confirm_dialog)
 
 	# Initially hide all advanced nodes (simple mode by default).
 	for node in _advanced_nodes:
@@ -291,7 +347,8 @@ func _get_os_username() -> String:
 
 
 ## Return a config-file path unique to the current OS-level desktop user.
-## This prevents Student A's token from loading when Student B logs in.
+## On Windows, uses AppData\Local (device-local, not synced by OneDrive).
+## On macOS/Linux, uses user:// (not cloud-synced by default).
 func _get_config_path() -> String:
 	var os_user := _get_os_username()
 	if os_user.is_empty():
@@ -308,7 +365,57 @@ func _get_config_path() -> String:
 			safe_user += "_"
 	if safe_user.is_empty():
 		safe_user = "default"
+
+	# On Windows, use AppData\Local (device-local, not synced by OneDrive).
+	var local_appdata := OS.get_environment("LOCALAPPDATA")
+	if not local_appdata.is_empty():
+		var dir_path := local_appdata.path_join("GodotGitHubClassroom")
+		if not DirAccess.dir_exists_absolute(dir_path):
+			DirAccess.make_dir_recursive_absolute(dir_path)
+		return dir_path.path_join("github_classroom_" + safe_user + ".cfg")
+
+	# macOS / Linux: user:// is fine (not cloud-synced by default).
 	return "user://github_classroom_" + safe_user + ".cfg"
+
+
+## Return the legacy config path (old user:// location, used for migration).
+func _get_legacy_config_path() -> String:
+	var os_user := _get_os_username()
+	if os_user.is_empty():
+		os_user = "default"
+	var safe_user := ""
+	for ch in os_user:
+		if (ch >= "0" and ch <= "9") or \
+		   (ch >= "A" and ch <= "Z") or \
+		   (ch >= "a" and ch <= "z") or \
+		   ch == "_":
+			safe_user += ch
+		else:
+			safe_user += "_"
+	if safe_user.is_empty():
+		safe_user = "default"
+	return "user://github_classroom_" + safe_user + ".cfg"
+
+
+## If a legacy user:// config exists but the new AppData\Local config does not,
+## copy the settings to the new location and delete the old file so the token
+## is no longer stored in AppData\Roaming (which OneDrive syncs).
+func _migrate_legacy_config() -> void:
+	var new_path := _get_config_path()
+	var legacy_path := _get_legacy_config_path()
+	if new_path == legacy_path:
+		return  # macOS / Linux: paths are the same, nothing to migrate.
+	if FileAccess.file_exists(new_path):
+		return  # New config already exists; migration not needed.
+	if not FileAccess.file_exists(legacy_path):
+		return  # No legacy config to migrate.
+	# Copy the legacy config to the new location.
+	var old_config := ConfigFile.new()
+	if old_config.load(legacy_path) != OK:
+		return
+	old_config.save(new_path)
+	# Remove the old file so the token no longer lives in AppData\Roaming.
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(legacy_path))
 
 
 # ===========================================================================
@@ -349,6 +456,29 @@ func _deobfuscate_token(obfuscated: String) -> String:
 # Settings persistence
 # ===========================================================================
 
+## Load the teacher-baked classroom config from the project template.
+## If oauth_client_id is set, pre-fills the Client ID field and locks it
+## so students cannot accidentally overwrite it.  If organization is set,
+## pre-fills the org field and locks it as well.
+func _load_classroom_config() -> void:
+	var config := ConfigFile.new()
+	if config.load(_CLASSROOM_CONFIG_PATH) != OK:
+		return
+	var client_id: String = config.get_value("classroom", "oauth_client_id", "")
+	if not client_id.is_empty():
+		_client_id_input.text = client_id
+		_client_id_input.editable = false
+		_client_id_input.tooltip_text = "OAuth Client ID set by your teacher in the project template (read-only)."
+		_classroom_config_locked = true
+	var org: String = config.get_value("classroom", "organization", "")
+	if not org.is_empty():
+		_org_input.text = org
+		_org_input.editable = false
+		_org_input.tooltip_text = "Organization set by your teacher in the project template (read-only)."
+	# Immediately reflect Client ID availability in Sign In button visibility.
+	_update_sign_in_button_visibility()
+
+
 func _save_settings() -> void:
 	var config := ConfigFile.new()
 	config.set_value("github", "repo_url", _repo_url_input.text)
@@ -358,10 +488,15 @@ func _save_settings() -> void:
 	config.set_value("github", "organization", _org_input.text)
 	config.set_value("github", "auto_push", _auto_push_option.get_selected_id())
 	config.set_value("github", "advanced_mode", _advanced_toggle.button_pressed)
+	# Never save the client_id when it was baked in by the teacher via
+	# classroom_config.cfg — the project file is the source of truth.
+	if not _classroom_config_locked:
+		config.set_value("github", "client_id", _client_id_input.text)
 	config.save(_get_config_path())
 
 
 func _load_settings() -> void:
+	_migrate_legacy_config()
 	var config := ConfigFile.new()
 	if config.load(_get_config_path()) == OK:
 		_repo_url_input.text = config.get_value("github", "repo_url", "")
@@ -377,7 +512,6 @@ func _load_settings() -> void:
 			config.save(_get_config_path())
 		_branch_input.text = config.get_value("github", "branch", "main")
 		_role_option.selected = config.get_value("github", "role", 0)
-		_org_input.text = config.get_value("github", "organization", "")
 		# Load auto_push by ID so reordered items work correctly.
 		# The saved integer values (0=Manual, 1=OnSave, 2=OnClose) match the
 		# AUTO_PUSH_* constants exactly, so this is also backward-compatible
@@ -390,7 +524,19 @@ func _load_settings() -> void:
 		var advanced_mode: bool = config.get_value("github", "advanced_mode", false)
 		_advanced_toggle.button_pressed = advanced_mode
 		_apply_advanced_mode(advanced_mode)
+		# Only load client_id from user config when not baked in via classroom_config.cfg.
+		if not _classroom_config_locked:
+			_client_id_input.text = config.get_value("github", "client_id", "")
+		# If classroom config locked the org field, do not overwrite it with
+		# whatever the user config stored — the project file is authoritative.
+		if _org_input.editable:
+			_org_input.text = config.get_value("github", "organization", "")
 		_update_connected_label()
+		_update_auto_push_mode_label()
+		_update_sign_in_button_visibility()
+	elif FileAccess.file_exists(_get_config_path()):
+		# Config file exists but could not be parsed (possibly corrupt).
+		_config_load_error = true
 
 
 # ===========================================================================
@@ -453,6 +599,7 @@ func _set_buttons_enabled(enabled: bool) -> void:
 	_save_button.disabled = not enabled
 	_sign_out_button.disabled = not enabled
 	_load_repos_button.disabled = not enabled
+	_sign_in_button.disabled = not enabled
 
 
 # ===========================================================================
@@ -463,6 +610,8 @@ func _on_save_pressed() -> void:
 	_save_settings()
 	_set_status("✅ [color=green]Settings saved![/color]")
 	_update_connected_label()
+	_update_auto_push_mode_label()
+	_update_sign_in_button_visibility()
 
 
 func _on_pull_pressed() -> void:
@@ -530,8 +679,14 @@ func _on_token_changed(_new_text: String) -> void:
 
 ## Sign out: wipe all credentials from the UI and persist the cleared state.
 func _on_sign_out_pressed() -> void:
+	# Cancel any in-progress OAuth device flow before wiping credentials.
+	_oauth_polling = false
+	_sign_in_button.text = "🔑 Sign in with GitHub"
+	_set_buttons_enabled(true)
 	_token_input.text = ""
-	_org_input.text = ""
+	# Preserve org and repo_url only if they are locked by classroom_config.cfg.
+	if _org_input.editable:
+		_org_input.text = ""
 	_repo_url_input.text = ""
 	_role_option.selected = 0
 	_loaded_repos.clear()
@@ -540,6 +695,179 @@ func _on_sign_out_pressed() -> void:
 	_save_settings()
 	_set_status("🔒 Signed out. Enter your GitHub Token to get started.")
 	_update_connected_label()
+
+
+func _on_clean_pull_pressed() -> void:
+	if not _configure_api():
+		return
+	_clean_pull_confirm_dialog.popup_centered()
+
+
+func _on_clean_pull_confirmed() -> void:
+	_set_buttons_enabled(false)
+	await _do_clean_pull()
+	_set_buttons_enabled(true)
+
+
+## Called when the Auto-Push dropdown selection changes.
+func _on_auto_push_option_changed(_index: int) -> void:
+	_update_auto_push_mode_label()
+
+
+# ===========================================================================
+# OAuth Device Flow
+# ===========================================================================
+
+## Show or hide the Sign-in button based on whether a Client ID is configured.
+## Visible whenever a Client ID is available — either baked in via
+## classroom_config.cfg or previously saved in the per-user config.
+func _update_sign_in_button_visibility() -> void:
+	_sign_in_button.visible = _classroom_config_locked or not _client_id_input.text.strip_edges().is_empty()
+
+
+## Called when "🔑 Sign in with GitHub" is clicked.
+## If a flow is already in progress the button acts as a cancel.
+func _on_sign_in_pressed() -> void:
+	if _oauth_polling:
+		# Cancel the ongoing flow; the coroutine cleans up the UI when it
+		# detects the flag is false at its next iteration.
+		_oauth_polling = false
+		return
+	var client_id := _client_id_input.text.strip_edges()
+	if client_id.is_empty():
+		_set_status("❌ [color=red]No OAuth Client ID is configured. Ask your teacher to set one up in the project template.[/color]")
+		return
+	await _do_oauth_device_flow(client_id)
+
+
+## Run the full GitHub OAuth Device Flow.
+## Asks GitHub for a device code, shows it to the user, opens their browser,
+## and polls until the user authorizes (or the code expires / is cancelled).
+func _do_oauth_device_flow(client_id: String) -> void:
+	_oauth_polling = true
+	_sign_in_button.text = "⏳ Waiting… (click to cancel)"
+	_set_buttons_enabled(false)
+	_sign_in_button.disabled = false  # keep enabled so the user can cancel
+
+	# Step 1 — ask GitHub for a device code.
+	_set_status("⏳ [color=yellow]Starting sign-in with GitHub...[/color]")
+	var code_result: Dictionary = await _api.request_device_code(client_id)
+
+	if not _oauth_polling:
+		_cleanup_oauth_ui()
+		_set_status("🔒 Sign-in cancelled.")
+		return
+
+	if code_result.has("error"):
+		_set_status("❌ [color=red]Could not start sign-in: " + str(code_result.error) + "[/color]")
+		_cleanup_oauth_ui()
+		return
+
+	var code_data = code_result.data
+	if not code_data is Dictionary or code_data.has("error"):
+		var err_desc: String
+		if code_data is Dictionary:
+			err_desc = str(code_data.get("error_description", code_data.get("error", "Unknown error")))
+		else:
+			err_desc = "Unexpected response format"
+		_set_status("❌ [color=red]GitHub error: " + err_desc + "[/color]")
+		_cleanup_oauth_ui()
+		return
+
+	var user_code: String = str(code_data.get("user_code", ""))
+	var device_code: String = str(code_data.get("device_code", ""))
+	var verification_uri: String = str(code_data.get("verification_uri", "https://github.com/login/device"))
+	var interval: int = int(code_data.get("interval", 5))
+	var expires_in: int = int(code_data.get("expires_in", 900))
+
+	if user_code.is_empty() or device_code.is_empty():
+		_set_status("❌ [color=red]Invalid device code response from GitHub.[/color]")
+		_cleanup_oauth_ui()
+		return
+
+	# Open the browser automatically (best-effort).
+	OS.shell_open(verification_uri)
+
+	_set_status(
+		"🔑 [b]Open your browser and enter this code:[/b]\n\n" +
+		"   URL:  [color=cyan]" + verification_uri + "[/color]\n" +
+		"   Code: [color=cyan][b]" + user_code + "[/b][/color]\n\n" +
+		"[color=gray]The page should have opened automatically.\n" +
+		"Click the button above to cancel.[/color]"
+	)
+
+	# Step 2 — poll until authorized, expired, or cancelled.
+	var elapsed := 0
+	var cancelled := false
+	var terminal_status := ""
+
+	while _oauth_polling and elapsed < expires_in:
+		await get_tree().create_timer(float(interval)).timeout
+		elapsed += interval
+
+		if not _oauth_polling:
+			cancelled = true
+			break
+
+		var token_result: Dictionary = await _api.poll_device_token(client_id, device_code)
+
+		if not _oauth_polling:
+			cancelled = true
+			break
+
+		if token_result.has("error"):
+			terminal_status = "❌ [color=red]Connection error: " + str(token_result.error) + "[/color]"
+			break
+
+		var token_data = token_result.data
+		if not token_data is Dictionary:
+			terminal_status = "❌ [color=red]Unexpected response from GitHub.[/color]"
+			break
+
+		if token_data.has("access_token"):
+			# ✅ Authorization complete.
+			_oauth_polling = false
+			_token_input.text = str(token_data.access_token)
+			_save_settings()
+			_update_connected_label()
+			_set_status("✅ [color=green]Signed in to GitHub! Your token has been saved.\nYou can now click Load My Assignments.[/color]")
+			_cleanup_oauth_ui()
+			return
+
+		var error_code: String = str(token_data.get("error", ""))
+		match error_code:
+			"authorization_pending":
+				pass  # keep polling
+			"slow_down":
+				interval = int(token_data.get("interval", interval + 5))
+			"expired_token":
+				terminal_status = "❌ [color=red]The sign-in code has expired. Click Sign in with GitHub to try again.[/color]"
+				break
+			"access_denied":
+				terminal_status = "❌ [color=red]Authorization was denied. Click Sign in with GitHub to try again.[/color]"
+				break
+			_:
+				var desc: String = str(token_data.get("error_description", error_code))
+				terminal_status = "❌ [color=red]GitHub error: " + desc + "[/color]"
+				break
+
+	_oauth_polling = false
+	_cleanup_oauth_ui()
+
+	if cancelled:
+		_set_status("🔒 Sign-in cancelled.")
+	elif terminal_status != "":
+		_set_status(terminal_status)
+	else:
+		# Loop exited because elapsed >= expires_in without a terminal error.
+		_set_status("❌ [color=red]Sign-in timed out. Click Sign in with GitHub to try again.[/color]")
+
+
+## Reset OAuth UI state and re-enable buttons after the flow ends.
+func _cleanup_oauth_ui() -> void:
+	_oauth_polling = false
+	_sign_in_button.text = "🔑 Sign in with GitHub"
+	_set_buttons_enabled(true)
 
 
 # ===========================================================================
@@ -812,6 +1140,17 @@ func _do_load_repos(org: String) -> void:
 			return
 		_append_status("✅ Verified as organization admin/owner.")
 
+		# Ensure auto-push is set to Manual for teachers to prevent
+		# accidentally overwriting student work.
+		if _auto_push_option.get_selected_id() != AUTO_PUSH_MANUAL:
+			for i in range(_auto_push_option.item_count):
+				if _auto_push_option.get_item_id(i) == AUTO_PUSH_MANUAL:
+					_auto_push_option.selected = i
+					break
+			_save_settings()
+			_update_auto_push_mode_label()
+			_append_status("⚠️ [color=yellow]Auto-push set to Manual to protect student work.[/color]")
+
 		# 3a – Load all org repos (paginated).
 		var page := 1
 		while true:
@@ -902,7 +1241,7 @@ func _populate_teacher_tree() -> void:
 			seen_assignments[a] = true
 			assignment_order.append(a)
 
-	# 4 – Create tree items.
+	# 4 – Create assignment folder items.
 	var folder_items := {}  # assignment_name -> TreeItem
 	for assignment_name in assignment_order:
 		var folder := _repo_tree.create_item(root)
@@ -910,6 +1249,12 @@ func _populate_teacher_tree() -> void:
 		folder.set_selectable(0, false)
 		folder.collapsed = true
 		folder_items[assignment_name] = folder
+
+	# Template repo name patterns (suffix-based detection).
+	const TEMPLATE_SUFFIXES := ["-template", "-starter", "-base", "-solution", "-demo"]
+	# Lazily-created folders for template and other (non-assignment) repos.
+	var template_folder: TreeItem = null
+	var extra_folder: TreeItem = null
 
 	for idx in range(_loaded_repos.size()):
 		var repo_name: String = str(_loaded_repos[idx].name)
@@ -921,9 +1266,37 @@ func _populate_teacher_tree() -> void:
 			child.set_tooltip_text(0, repo_name)
 			child.set_metadata(0, idx)
 		else:
-			var child := _repo_tree.create_item(root)
-			child.set_text(0, repo_name)
-			child.set_metadata(0, idx)
+			# Determine whether this ungrouped repo is a template or an extra.
+			# A repo is treated as a template if its name exactly matches a known
+			# assignment prefix (e.g. the source repo named "project-1" alongside
+			# student repos "project-1-alice", "project-1-bob") or if it uses a
+			# common template-naming suffix.
+			var is_template := seen_assignments.has(repo_name)
+			if not is_template:
+				for suffix in TEMPLATE_SUFFIXES:
+					if repo_name.ends_with(suffix):
+						is_template = true
+						break
+			if is_template:
+				if template_folder == null:
+					template_folder = _repo_tree.create_item(root)
+					template_folder.set_text(0, "📋 Templates")
+					template_folder.set_selectable(0, false)
+					template_folder.collapsed = true
+				var child := _repo_tree.create_item(template_folder)
+				child.set_text(0, repo_name)
+				child.set_tooltip_text(0, repo_name)
+				child.set_metadata(0, idx)
+			else:
+				if extra_folder == null:
+					extra_folder = _repo_tree.create_item(root)
+					extra_folder.set_text(0, "📦 Other Repos")
+					extra_folder.set_selectable(0, false)
+					extra_folder.collapsed = true
+				var child := _repo_tree.create_item(extra_folder)
+				child.set_text(0, repo_name)
+				child.set_tooltip_text(0, repo_name)
+				child.set_metadata(0, idx)
 
 
 ## Build a flat tree view for students (no grouping).
@@ -959,6 +1332,58 @@ func _trigger_auto_push() -> void:
 	await _do_push()
 	_set_buttons_enabled(true)
 	_is_pushing = false
+
+
+# ===========================================================================
+# Clean pull logic
+# ===========================================================================
+
+## Delete all local project files except the addons/ directory, then
+## perform a normal pull.  Used by teachers when switching between student
+## projects to guarantee no stale files remain.
+func _do_clean_pull() -> void:
+	_set_status("⏳ [color=yellow]Preparing clean pull – removing local files...[/color]")
+	var project_path: String = ProjectSettings.globalize_path("res://")
+	_delete_files_except_addons(project_path, "")
+	_append_status("⏳ Downloading fresh copy from GitHub...")
+	await _do_pull()
+
+
+## Recursively delete all files and non-excluded directories under
+## base_path/relative_path, skipping the top-level "addons" directory
+## so the addon itself remains functional.
+func _delete_files_except_addons(base_path: String, relative_path: String) -> void:
+	var full_dir: String = base_path.path_join(relative_path) if not relative_path.is_empty() else base_path
+	var dir := DirAccess.open(full_dir)
+	if dir == null:
+		return
+
+	var subdirs: Array = []
+	var files_to_delete: Array = []
+
+	dir.list_dir_begin()
+	var entry := dir.get_next()
+	while not entry.is_empty():
+		var rel: String = relative_path.path_join(entry) if not relative_path.is_empty() else entry
+		if dir.current_is_dir():
+			# Preserve the addons/ directory at the project root so the
+			# addon itself (and any other plugins) keep working.
+			var is_root_addons := (relative_path.is_empty() and entry == "addons")
+			if not is_root_addons and entry not in EXCLUDED_DIRS:
+				subdirs.append(rel)
+		else:
+			if entry not in EXCLUDED_FILES:
+				files_to_delete.append(rel)
+		entry = dir.get_next()
+	dir.list_dir_end()
+
+	# Recurse depth-first so directories are empty before we try to remove them.
+	for subdir in subdirs:
+		_delete_files_except_addons(base_path, subdir)
+		DirAccess.remove_absolute(base_path.path_join(subdir))
+
+	for file_rel in files_to_delete:
+		DirAccess.remove_absolute(base_path.path_join(file_rel))
 
 
 # ===========================================================================
@@ -1072,3 +1497,22 @@ func _update_last_saved_label() -> void:
 	elif hour == 0:
 		hour = 12
 	_last_saved_label.text = "Last saved to GitHub: Today at %d:%02d %s" % [hour, minute, am_pm]
+
+
+## Update the auto-push mode indicator label to reflect the current setting.
+## This label is always visible so both Simple and Advanced users can see
+## whether changes are uploaded automatically.
+func _update_auto_push_mode_label() -> void:
+	var mode_id := _auto_push_option.get_selected_id()
+	match mode_id:
+		AUTO_PUSH_MANUAL:
+			_auto_push_mode_label.text = "Upload mode: Manual only (use ⬆ Save to GitHub)"
+			_auto_push_mode_label.add_theme_color_override("font_color", Color.GRAY)
+		AUTO_PUSH_ON_SAVE:
+			_auto_push_mode_label.text = "Upload mode: Auto-push on every save ✓"
+			_auto_push_mode_label.add_theme_color_override("font_color", Color(0.4, 0.9, 0.4))
+		AUTO_PUSH_ON_CLOSE:
+			_auto_push_mode_label.text = "Upload mode: Auto-push when editor closes ✓"
+			_auto_push_mode_label.add_theme_color_override("font_color", Color(0.9, 0.7, 0.4))
+		_:
+			_auto_push_mode_label.text = ""
