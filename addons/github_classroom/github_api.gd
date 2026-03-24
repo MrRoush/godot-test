@@ -118,7 +118,7 @@ func get_git_tree(tree_sha: String) -> Dictionary:
 
 ## Download a blob's content. Returns {"content": PackedByteArray} on success.
 func get_blob(blob_sha: String) -> Dictionary:
-	var result := await _make_request(
+	var result: Dictionary = await _make_request(
 		HTTPClient.METHOD_GET,
 		"/repos/%s/%s/git/blobs/%s" % [_owner, _repo, blob_sha],
 	)

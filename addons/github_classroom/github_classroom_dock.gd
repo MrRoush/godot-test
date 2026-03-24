@@ -712,7 +712,7 @@ func _do_oauth_device_flow(client_id: String) -> void:
 			cancelled = true
 			break
 
-		var token_result := await _api.poll_device_token(client_id, device_code)
+		var token_result: Dictionary = await _api.poll_device_token(client_id, device_code)
 
 		if not _oauth_polling:
 			cancelled = true
