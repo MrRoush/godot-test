@@ -1086,15 +1086,15 @@ func _delete_files_except_addons(base_path: String, relative_path: String) -> vo
 	dir.list_dir_begin()
 	var entry := dir.get_next()
 	while not entry.is_empty():
-		var rel: String = (relative_path + "/" + entry) if not relative_path.is_empty() else entry
+		var rel: String = relative_path.path_join(entry) if not relative_path.is_empty() else entry
 		if dir.current_is_dir():
 			# Preserve the addons/ directory at the project root so the
 			# addon itself (and any other plugins) keep working.
 			var is_root_addons := (relative_path.is_empty() and entry == "addons")
-			if not is_root_addons and not entry in EXCLUDED_DIRS:
+			if not is_root_addons and entry not in EXCLUDED_DIRS:
 				subdirs.append(rel)
 		else:
-			if not entry in EXCLUDED_FILES:
+			if entry not in EXCLUDED_FILES:
 				files_to_delete.append(rel)
 		entry = dir.get_next()
 	dir.list_dir_end()
