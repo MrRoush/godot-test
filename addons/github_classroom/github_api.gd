@@ -21,11 +21,15 @@ func _ready() -> void:
 
 
 func _setup_tls() -> void:
-	# Use Godot's built-in CA bundle (null = system/Mozilla trust store).
-	# This survives GitHub certificate rotations and works on all machines.
-	# The bundled cert is no longer used as the sole trust root since doing
-	# so caused RESULT_CANT_CONNECT (result 5) when GitHub's chain changed.
-	_tls_options = null
+	if FileAccess.file_exists(_CERT_PATH):
+		var cert = X509Certificate.new()
+		var err = cert.load(_CERT_PATH)
+
+		if err == OK:
+			_tls_options = TLSOptions.client(cert)
+			return
+	
+	_tls_options = TLSOptions.client()
 
 
 func setup(token: String, owner: String, repo: String, branch: String = "main") -> void:
