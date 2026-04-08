@@ -458,7 +458,7 @@ func _deobfuscate_token(obfuscated: String) -> String:
 
 ## Load the teacher-baked classroom config from the project template.
 ## If oauth_client_id is set, pre-fills the Client ID field and locks it
-## so students cannot accidentally overwrite it.  If organization is set,
+## so students cannot accidentally overwrite it.  If org_name is set,
 ## pre-fills the org field and locks it as well.
 func _load_classroom_config() -> void:
 	var config := ConfigFile.new()
@@ -470,7 +470,7 @@ func _load_classroom_config() -> void:
 		_client_id_input.editable = false
 		_client_id_input.tooltip_text = "OAuth Client ID set by your teacher in the project template (read-only)."
 		_classroom_config_locked = true
-	var org: String = config.get_value("classroom", "organization", "")
+	var org: String = config.get_value("classroom", "org_name", "")
 	if not org.is_empty():
 		_org_input.text = org
 		_org_input.editable = false
@@ -485,7 +485,7 @@ func _save_settings() -> void:
 	config.set_value("github", "token_v2", _obfuscate_token(_token_input.text))
 	config.set_value("github", "branch", _branch_input.text)
 	config.set_value("github", "role", _role_option.selected)
-	config.set_value("github", "organization", _org_input.text)
+	config.set_value("github", "org_name", _org_input.text)
 	config.set_value("github", "auto_push", _auto_push_option.get_selected_id())
 	config.set_value("github", "advanced_mode", _advanced_toggle.button_pressed)
 	# Never save the client_id when it was baked in by the teacher via
@@ -530,7 +530,7 @@ func _load_settings() -> void:
 		# If classroom config locked the org field, do not overwrite it with
 		# whatever the user config stored — the project file is authoritative.
 		if _org_input.editable:
-			_org_input.text = config.get_value("github", "organization", "")
+			_org_input.text = config.get_value("github", "org_name", "")
 		_update_connected_label()
 		_update_auto_push_mode_label()
 		_update_sign_in_button_visibility()
