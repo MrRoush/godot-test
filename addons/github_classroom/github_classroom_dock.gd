@@ -1169,8 +1169,49 @@ func _do_load_repos(org: String) -> void:
 				break
 			page += 1
 
+		# 4a – Try to fetch assignment slugs from GitHub Classroom API so repos
+		#      are grouped by their real assignment name rather than a heuristic.
+		#      This correctly handles multiple classrooms in the same org that
+		#      share the same assignment (e.g. two class periods / blocks).
+		#      Falls back silently to name-based heuristics if the API is not
+		#      accessible (e.g. token lacks manage_classrooms scope).
+		var known_slugs: Array = []
+		var classrooms_page := 1
+		while true:
+			var classrooms_result: Dictionary = await _api.get_classrooms(classrooms_page)
+			var classrooms_data = classrooms_result.get("data")
+			if not (classrooms_data is Array) or (classrooms_data as Array).is_empty():
+				break
+			for classroom in classrooms_data:
+				# Only consider classrooms that belong to this organization.
+				var classroom_org: String = str(classroom.get("organization", {}).get("login", ""))
+				if classroom_org.to_lower() != org.to_lower():
+					continue
+				# Collect all assignments for this classroom (paginated).
+				var assignments_page := 1
+				while true:
+					var assignments_result: Dictionary = await _api.get_classroom_assignments(int(classroom.id), assignments_page)
+					var assignments_data = assignments_result.get("data")
+					if not (assignments_data is Array) or (assignments_data as Array).is_empty():
+						break
+					for assignment in assignments_data:
+						var slug: String = str(assignment.get("slug", ""))
+						var title: String = str(assignment.get("title", slug))
+						if not slug.is_empty():
+							known_slugs.append({"slug": slug, "title": title})
+					if (assignments_data as Array).size() < 100:
+						break
+					assignments_page += 1
+			if (classrooms_data as Array).size() < 100:
+				break
+			classrooms_page += 1
+		if not known_slugs.is_empty():
+			_append_status("✅ Found %d assignments via GitHub Classroom API." % known_slugs.size())
+		else:
+			_append_status("ℹ️ GitHub Classroom API unavailable – using name-based grouping.")
+
 		# Build the grouped tree view for teachers.
-		_populate_teacher_tree()
+		_populate_teacher_tree(known_slugs)
 	else:
 		# 2b/3b – Student: load user repos filtered by org and username.
 		var page := 1
@@ -1207,8 +1248,114 @@ func _do_load_repos(org: String) -> void:
 ## Build a grouped tree view for teachers.  Repos following the GitHub
 ## Classroom naming convention ({assignment}-{username}) are grouped
 ## under collapsible assignment folders.
-func _populate_teacher_tree() -> void:
+##
+## [param known_slugs] is an Array of {"slug": String, "title": String}
+## dictionaries obtained from the GitHub Classroom API.  When provided,
+## repos are matched against those exact slugs so every classroom period
+## sharing the same assignment ends up in one folder regardless of any
+## classroom-specific identifier embedded in the repo name.
+## When the array is empty the function falls back to a name-based
+## heuristic that counts shared hyphen-delimited prefixes.
+func _populate_teacher_tree(known_slugs: Array = []) -> void:
 	var root := _repo_tree.create_item()
+
+	# Template repo name patterns (suffix-based detection).
+	const TEMPLATE_SUFFIXES := ["-template", "-starter", "-base", "-solution", "-demo"]
+	# Lazily-created folders for template and other (non-assignment) repos.
+	var template_folder: TreeItem = null
+	var extra_folder: TreeItem = null
+
+	if not known_slugs.is_empty():
+		# ---------------------------------------------------------------
+		# API-based path: use the exact assignment slugs returned by the
+		# GitHub Classroom API so grouping is always accurate.
+		# Slugs are sorted longest-first so a more-specific assignment
+		# (e.g. "unit-1-review") matches before a shorter one ("unit-1").
+		# ---------------------------------------------------------------
+		var sorted_slugs: Array = known_slugs.duplicate()
+		sorted_slugs.sort_custom(func(a, b): return a.get("slug", "").length() > b.get("slug", "").length())
+
+		# Map each repo index to the matching slug info dict (or {}).
+		var assignment_for_repo: Array = []
+		var slug_repo_count := {}  # slug -> int (actual matched count)
+		for repo in _loaded_repos:
+			var repo_name: String = str(repo.name)
+			var matched: Dictionary = {}
+			for slug_info in sorted_slugs:
+				var slug: String = slug_info.slug
+				# A repo belongs to an assignment when its name is exactly the
+				# slug (the template/source repo) or starts with the slug
+				# followed by a hyphen (the student repo).
+				if repo_name == slug or repo_name.begins_with(slug + "-"):
+					matched = slug_info
+					break
+			assignment_for_repo.append(matched)
+			if not matched.is_empty():
+				slug_repo_count[matched.slug] = slug_repo_count.get(matched.slug, 0) + 1
+
+		# Build ordered list of unique slugs (preserving first-seen order).
+		var seen_slugs := {}
+		var slug_order: Array = []
+		for info in assignment_for_repo:
+			if not info.is_empty() and not seen_slugs.has(info.slug):
+				seen_slugs[info.slug] = true
+				slug_order.append(info)
+
+		# Create assignment folder items.
+		var folder_items := {}  # slug -> TreeItem
+		for slug_info in slug_order:
+			var count: int = slug_repo_count.get(slug_info.slug, 0)
+			var folder := _repo_tree.create_item(root)
+			folder.set_text(0, slug_info.title + " (" + str(count) + ")")
+			folder.set_selectable(0, false)
+			folder.collapsed = true
+			folder_items[slug_info.slug] = folder
+
+		for idx in range(_loaded_repos.size()):
+			var repo_name: String = str(_loaded_repos[idx].name)
+			var info: Dictionary = assignment_for_repo[idx]
+			if not info.is_empty() and repo_name != info.slug:
+				# Student repo: label is everything after "{slug}-".
+				var student_label: String = repo_name.substr(info.slug.length() + 1)
+				var child := _repo_tree.create_item(folder_items[info.slug])
+				child.set_text(0, student_label)
+				child.set_tooltip_text(0, repo_name)
+				child.set_metadata(0, idx)
+			else:
+				# Unmatched or exact-slug repo → template or other.
+				var is_template := seen_slugs.has(repo_name)
+				if not is_template:
+					for suffix in TEMPLATE_SUFFIXES:
+						if repo_name.ends_with(suffix):
+							is_template = true
+							break
+				if is_template:
+					if template_folder == null:
+						template_folder = _repo_tree.create_item(root)
+						template_folder.set_text(0, "📋 Templates")
+						template_folder.set_selectable(0, false)
+						template_folder.collapsed = true
+					var child := _repo_tree.create_item(template_folder)
+					child.set_text(0, repo_name)
+					child.set_tooltip_text(0, repo_name)
+					child.set_metadata(0, idx)
+				else:
+					if extra_folder == null:
+						extra_folder = _repo_tree.create_item(root)
+						extra_folder.set_text(0, "📦 Other Repos")
+						extra_folder.set_selectable(0, false)
+						extra_folder.collapsed = true
+					var child := _repo_tree.create_item(extra_folder)
+					child.set_text(0, repo_name)
+					child.set_tooltip_text(0, repo_name)
+					child.set_metadata(0, idx)
+		return
+
+	# -----------------------------------------------------------------------
+	# Heuristic fallback: group repos by the longest hyphen-delimited prefix
+	# that is shared by at least two repos.  Used when the GitHub Classroom
+	# API is not accessible (e.g. the token lacks manage_classrooms scope).
+	# -----------------------------------------------------------------------
 
 	# 1 – Determine the assignment prefix for each repo.
 	#     Count how many repos share each possible hyphen-delimited prefix.
@@ -1249,12 +1396,6 @@ func _populate_teacher_tree() -> void:
 		folder.set_selectable(0, false)
 		folder.collapsed = true
 		folder_items[assignment_name] = folder
-
-	# Template repo name patterns (suffix-based detection).
-	const TEMPLATE_SUFFIXES := ["-template", "-starter", "-base", "-solution", "-demo"]
-	# Lazily-created folders for template and other (non-assignment) repos.
-	var template_folder: TreeItem = null
-	var extra_folder: TreeItem = null
 
 	for idx in range(_loaded_repos.size()):
 		var repo_name: String = str(_loaded_repos[idx].name)

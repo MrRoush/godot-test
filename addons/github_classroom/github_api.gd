@@ -224,6 +224,25 @@ func get_user_repos(page: int = 1) -> Dictionary:
 # OAuth Device Flow (no server or callback URL required)
 # ---------------------------------------------------------------------------
 
+## List classrooms accessible to the authenticated user (GitHub Classroom API).
+## Requires org admin access; OAuth users also need the manage_classrooms scope.
+## Returns {"data": Array} on success or {"error": "..."} on failure.
+func get_classrooms(page: int = 1) -> Dictionary:
+	return await _make_request(
+		HTTPClient.METHOD_GET,
+		"/classrooms?per_page=100&page=%d" % page,
+	)
+
+
+## List assignments for a specific GitHub Classroom.
+## Returns {"data": Array} on success or {"error": "..."} on failure.
+func get_classroom_assignments(classroom_id: int, page: int = 1) -> Dictionary:
+	return await _make_request(
+		HTTPClient.METHOD_GET,
+		"/classrooms/%d/assignments?per_page=100&page=%d" % [classroom_id, page],
+	)
+
+
 ## Request a device code for the GitHub OAuth Device Flow.
 ## [param client_id] is the OAuth App's Client ID (a public identifier, not a secret).
 ## Returns {"data": {...}} on success or {"error": "..."} on a connection/parse failure.
@@ -231,7 +250,7 @@ func get_user_repos(page: int = 1) -> Dictionary:
 func request_device_code(client_id: String) -> Dictionary:
 	return await _make_device_flow_request(
 		"/login/device/code",
-		{"client_id": client_id, "scope": "repo"},
+		{"client_id": client_id, "scope": "repo manage_classrooms"},
 	)
 
 
