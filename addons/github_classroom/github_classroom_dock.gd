@@ -1179,9 +1179,10 @@ func _do_load_repos(org: String) -> void:
 		var classrooms_page := 1
 		while true:
 			var classrooms_result: Dictionary = await _api.get_classrooms(classrooms_page)
-			if classrooms_result.has("error") or not (classrooms_result.data is Array) or classrooms_result.data.is_empty():
+			var classrooms_data = classrooms_result.get("data")
+			if not (classrooms_data is Array) or (classrooms_data as Array).is_empty():
 				break
-			for classroom in classrooms_result.data:
+			for classroom in classrooms_data:
 				# Only consider classrooms that belong to this organization.
 				var classroom_org: String = str(classroom.get("organization", {}).get("login", ""))
 				if classroom_org.to_lower() != org.to_lower():
@@ -1190,17 +1191,18 @@ func _do_load_repos(org: String) -> void:
 				var assignments_page := 1
 				while true:
 					var assignments_result: Dictionary = await _api.get_classroom_assignments(int(classroom.id), assignments_page)
-					if assignments_result.has("error") or not (assignments_result.data is Array) or assignments_result.data.is_empty():
+					var assignments_data = assignments_result.get("data")
+					if not (assignments_data is Array) or (assignments_data as Array).is_empty():
 						break
-					for assignment in assignments_result.data:
+					for assignment in assignments_data:
 						var slug: String = str(assignment.get("slug", ""))
 						var title: String = str(assignment.get("title", slug))
 						if not slug.is_empty():
 							known_slugs.append({"slug": slug, "title": title})
-					if assignments_result.data.size() < 100:
+					if (assignments_data as Array).size() < 100:
 						break
 					assignments_page += 1
-			if classrooms_result.data.size() < 100:
+			if (classrooms_data as Array).size() < 100:
 				break
 			classrooms_page += 1
 		if not known_slugs.is_empty():
@@ -1271,7 +1273,7 @@ func _populate_teacher_tree(known_slugs: Array = []) -> void:
 		# (e.g. "unit-1-review") matches before a shorter one ("unit-1").
 		# ---------------------------------------------------------------
 		var sorted_slugs: Array = known_slugs.duplicate()
-		sorted_slugs.sort_custom(func(a, b): return a.slug.length() > b.slug.length())
+		sorted_slugs.sort_custom(func(a, b): return a.get("slug", "").length() > b.get("slug", "").length())
 
 		# Map each repo index to the matching slug info dict (or {}).
 		var assignment_for_repo: Array = []
