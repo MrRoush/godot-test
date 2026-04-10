@@ -243,6 +243,16 @@ func get_classroom_assignments(classroom_id: int, page: int = 1) -> Dictionary:
 	)
 
 
+## List accepted assignments (student submissions) for a specific assignment.
+## Each entry includes the student(s) and their repository.
+## Returns {"data": Array} on success or {"error": "..."} on failure.
+func get_accepted_assignments(assignment_id: int, page: int = 1) -> Dictionary:
+	return await _make_request(
+		HTTPClient.METHOD_GET,
+		"/assignments/%d/accepted_assignments?per_page=100&page=%d" % [assignment_id, page],
+	)
+
+
 ## Request a device code for the GitHub OAuth Device Flow.
 ## [param client_id] is the OAuth App's Client ID (a public identifier, not a secret).
 ## Returns {"data": {...}} on success or {"error": "..."} on a connection/parse failure.

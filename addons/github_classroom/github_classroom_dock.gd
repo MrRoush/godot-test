@@ -1169,49 +1169,141 @@ func _do_load_repos(org: String) -> void:
 				break
 			page += 1
 
-		# 4a – Try to fetch assignment slugs from GitHub Classroom API so repos
-		#      are grouped by their real assignment name rather than a heuristic.
-		#      This correctly handles multiple classrooms in the same org that
-		#      share the same assignment (e.g. two class periods / blocks).
+		# 4a – Fetch classroom → assignment → accepted-assignment data from the
+		#      GitHub Classroom API.  This builds a hierarchical structure so repos
+		#      are grouped by classroom first, then by assignment, then by student.
 		#      Falls back silently to name-based heuristics if the API is not
 		#      accessible (e.g. token lacks manage_classrooms scope).
-		var known_slugs: Array = []
+		var classroom_data: Array = []
+		var template_repo_names: Dictionary = {}  # repo_name -> true
+		var assigned_repo_names: Dictionary = {}  # repo_name -> true
+		var api_available := true
+
+		# Build name→index map for quick _loaded_repos lookup.
+		var repo_name_to_idx: Dictionary = {}
+		for idx in range(_loaded_repos.size()):
+			repo_name_to_idx[str(_loaded_repos[idx].name)] = idx
+
 		var classrooms_page := 1
-		while true:
+		while api_available:
 			var classrooms_result: Dictionary = await _api.get_classrooms(classrooms_page)
-			var classrooms_data = classrooms_result.get("data")
-			if not (classrooms_data is Array) or (classrooms_data as Array).is_empty():
+			var classrooms_list = classrooms_result.get("data")
+			if classrooms_result.has("error") or not (classrooms_list is Array):
+				api_available = false
 				break
-			for classroom in classrooms_data:
-				# Only consider classrooms that belong to this organization.
+			if (classrooms_list as Array).is_empty():
+				break
+			for classroom in classrooms_list:
 				var classroom_org: String = str(classroom.get("organization", {}).get("login", ""))
 				if classroom_org.to_lower() != org.to_lower():
 					continue
-				# Collect all assignments for this classroom (paginated).
+
+				var classroom_info := {
+					"name": str(classroom.get("name", "")),
+					"id": int(classroom.get("id", 0)),
+					"assignments": [] as Array,
+				}
+
+				# Fetch assignments for this classroom (paginated).
 				var assignments_page := 1
 				while true:
-					var assignments_result: Dictionary = await _api.get_classroom_assignments(int(classroom.id), assignments_page)
-					var assignments_data = assignments_result.get("data")
-					if not (assignments_data is Array) or (assignments_data as Array).is_empty():
+					var assignments_result: Dictionary = await _api.get_classroom_assignments(classroom_info.id, assignments_page)
+					var assignments_list = assignments_result.get("data")
+					if not (assignments_list is Array) or (assignments_list as Array).is_empty():
 						break
-					for assignment in assignments_data:
+					for assignment in assignments_list:
 						var slug: String = str(assignment.get("slug", ""))
 						var title: String = str(assignment.get("title", slug))
-						if not slug.is_empty():
-							known_slugs.append({"slug": slug, "title": title})
-					if (assignments_data as Array).size() < 100:
+						var assignment_id: int = int(assignment.get("id", 0))
+						if slug.is_empty():
+							continue
+
+						# Track starter/template repo if provided.
+						var starter = assignment.get("starter_code_repository")
+						if starter is Dictionary:
+							var starter_name: String = str(starter.get("name", ""))
+							if not starter_name.is_empty():
+								template_repo_names[starter_name] = true
+
+						var assignment_info := {
+							"slug": slug,
+							"title": title,
+							"id": assignment_id,
+							"repos": [] as Array,
+						}
+
+						# Fetch accepted assignments (student repos) for this assignment.
+						var accepted_page := 1
+						while true:
+							var accepted_result: Dictionary = await _api.get_accepted_assignments(assignment_id, accepted_page)
+							var accepted_list = accepted_result.get("data")
+							if not (accepted_list is Array) or (accepted_list as Array).is_empty():
+								break
+							for accepted in accepted_list:
+								var repo_data = accepted.get("repository")
+								if not (repo_data is Dictionary):
+									continue
+								var repo_name: String = str(repo_data.get("name", ""))
+								if repo_name.is_empty():
+									continue
+
+								# Derive a student display label.
+								var student_label := ""
+								var students = accepted.get("students")
+								if students is Array and not (students as Array).is_empty():
+									var names: Array = []
+									for s in students:
+										names.append(str(s.get("login", "")))
+									student_label = ", ".join(names)
+								else:
+									# Fallback: derive from repo name.
+									if repo_name.begins_with(slug + "-"):
+										student_label = repo_name.substr(slug.length() + 1)
+									else:
+										student_label = repo_name
+
+								# Map to _loaded_repos index (add if missing).
+								var repo_idx: int = repo_name_to_idx.get(repo_name, -1)
+								if repo_idx == -1:
+									repo_idx = _loaded_repos.size()
+									var owner_name: String = str(repo_data.get("owner", {}).get("login", org))
+									_loaded_repos.append({
+										"name": repo_name,
+										"owner": owner_name,
+									})
+									repo_name_to_idx[repo_name] = repo_idx
+
+								assignment_info.repos.append({
+									"student": student_label,
+									"repo_idx": repo_idx,
+								})
+								assigned_repo_names[repo_name] = true
+							if (accepted_list as Array).size() < 100:
+								break
+							accepted_page += 1
+
+						# Sort student repos alphabetically within each assignment.
+						assignment_info.repos.sort_custom(func(a, b): return str(a.student).to_lower() < str(b.student).to_lower())
+						classroom_info.assignments.append(assignment_info)
+					if (assignments_list as Array).size() < 100:
 						break
 					assignments_page += 1
-			if (classrooms_data as Array).size() < 100:
+
+				if not classroom_info.assignments.is_empty():
+					classroom_data.append(classroom_info)
+			if (classrooms_list as Array).size() < 100:
 				break
 			classrooms_page += 1
-		if not known_slugs.is_empty():
-			_append_status("✅ Found %d assignments via GitHub Classroom API." % known_slugs.size())
-		else:
-			_append_status("ℹ️ GitHub Classroom API unavailable – using name-based grouping.")
 
-		# Build the grouped tree view for teachers.
-		_populate_teacher_tree(known_slugs)
+		if api_available and not classroom_data.is_empty():
+			_append_status("✅ Found %d classroom(s) with assignments." % classroom_data.size())
+			_populate_teacher_tree_by_classroom(classroom_data, template_repo_names, assigned_repo_names, org)
+		else:
+			if not api_available:
+				_append_status("ℹ️ GitHub Classroom API unavailable – using name-based grouping.")
+			else:
+				_append_status("ℹ️ No classrooms with assignments found – using name-based grouping.")
+			_populate_teacher_tree([])
 	else:
 		# 2b/3b – Student: load user repos filtered by org and username.
 		var page := 1
@@ -1243,6 +1335,75 @@ func _do_load_repos(org: String) -> void:
 		_append_status("⚠️ [color=yellow]No repositories found.[/color]")
 	else:
 		_append_status("✅ [color=green]Found " + str(_loaded_repos.size()) + " repositories.[/color]")
+
+
+## Build a tree view for teachers grouped by classroom, then by assignment,
+## then by student.  Uses data gathered from the GitHub Classroom API
+## (classrooms → assignments → accepted_assignments).
+##
+## [param classroom_data] is an Array of classroom dictionaries, each
+## containing a "name", "id", and "assignments" array.  Each assignment has
+## "slug", "title", "id", and "repos" (an Array of {"student", "repo_idx"}).
+## [param template_repo_names] maps repo names used as assignment starter
+## code to true.
+## [param assigned_repo_names] maps repo names already placed in a
+## classroom to true.
+## [param org_name] is the organization name shown in the Templates header.
+func _populate_teacher_tree_by_classroom(classroom_data: Array, template_repo_names: Dictionary, assigned_repo_names: Dictionary, org_name: String) -> void:
+	var root := _repo_tree.create_item()
+
+	# Classroom-level folders with assignment sub-folders.
+	for classroom_info in classroom_data:
+		var total_student_repos := 0
+		for a in classroom_info.assignments:
+			total_student_repos += (a.repos as Array).size()
+
+		var classroom_folder := _repo_tree.create_item(root)
+		classroom_folder.set_text(0, str(classroom_info.name) + " (" + str(total_student_repos) + ")")
+		classroom_folder.set_selectable(0, false)
+		classroom_folder.collapsed = true
+
+		for assignment_info in classroom_info.assignments:
+			var assignment_folder := _repo_tree.create_item(classroom_folder)
+			assignment_folder.set_text(0, str(assignment_info.title) + " (" + str((assignment_info.repos as Array).size()) + ")")
+			assignment_folder.set_selectable(0, false)
+			assignment_folder.collapsed = true
+
+			for repo_info in assignment_info.repos:
+				var child := _repo_tree.create_item(assignment_folder)
+				child.set_text(0, str(repo_info.student))
+				child.set_tooltip_text(0, str(_loaded_repos[repo_info.repo_idx].name))
+				child.set_metadata(0, repo_info.repo_idx)
+
+	# Template repos section (starter code repos used by assignments).
+	var template_folder: TreeItem = null
+	var extra_folder: TreeItem = null
+
+	for idx in range(_loaded_repos.size()):
+		var repo_name: String = str(_loaded_repos[idx].name)
+		if assigned_repo_names.has(repo_name):
+			continue  # Already shown under a classroom.
+
+		if template_repo_names.has(repo_name):
+			if template_folder == null:
+				template_folder = _repo_tree.create_item(root)
+				template_folder.set_text(0, "📋 " + org_name + " (Course Template Files)")
+				template_folder.set_selectable(0, false)
+				template_folder.collapsed = true
+			var child := _repo_tree.create_item(template_folder)
+			child.set_text(0, repo_name)
+			child.set_tooltip_text(0, repo_name)
+			child.set_metadata(0, idx)
+		else:
+			if extra_folder == null:
+				extra_folder = _repo_tree.create_item(root)
+				extra_folder.set_text(0, "📦 Other Repos")
+				extra_folder.set_selectable(0, false)
+				extra_folder.collapsed = true
+			var child := _repo_tree.create_item(extra_folder)
+			child.set_text(0, repo_name)
+			child.set_tooltip_text(0, repo_name)
+			child.set_metadata(0, idx)
 
 
 ## Build a grouped tree view for teachers.  Repos following the GitHub
