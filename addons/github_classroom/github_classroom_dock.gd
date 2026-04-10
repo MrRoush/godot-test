@@ -1251,7 +1251,7 @@ func _do_load_repos(org: String) -> void:
 								var student_label := ""
 								var students = accepted.get("students")
 								if students is Array and not (students as Array).is_empty():
-									var names: Array = []
+									var names: PackedStringArray = []
 									for s in students:
 										names.append(str(s.get("login", "")))
 									student_label = ", ".join(names)
@@ -1283,7 +1283,7 @@ func _do_load_repos(org: String) -> void:
 							accepted_page += 1
 
 						# Sort student repos alphabetically within each assignment.
-						assignment_info.repos.sort_custom(func(a, b): return str(a.student).to_lower() < str(b.student).to_lower())
+						assignment_info.repos.sort_custom(func(a, b): return a.student.to_lower() < b.student.to_lower())
 						classroom_info.assignments.append(assignment_info)
 					if (assignments_list as Array).size() < 100:
 						break
