@@ -6,6 +6,14 @@ Everything happens through a small panel inside the Godot editor, making it idea
 
 ---
 
+## Two Addons Are Available
+
+- **`addons/github_classroom`** — use this when your class can use GitHub Classroom.
+- **`addons/local_classroom`** — use this when your class needs direct local server backups over a Windows file share (no GitHub/internet).
+  See `addons/local_classroom/README.md` for setup.
+
+---
+
 ## Features
 
 | Feature | Description |
