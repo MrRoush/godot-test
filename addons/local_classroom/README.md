@@ -156,7 +156,7 @@ If your school maps a drive letter (e.g. `Z:`) to the file server, you can use t
 | `classroom_config.cfg` → `server_path` | `\\SERVER\GodotClassroom` | `Z:\GodotClassroom` |
 | Server-path field in dock | `\\SERVER\GodotClassroom` | `Z:\GodotClassroom` |
 
-Both formats work identically. The addon normalises slashes internally, so either forward slashes (`Z:/GodotClassroom`) or backslashes (`Z:\GodotClassroom`) are accepted.
+Both formats work identically. The addon normalizes slashes internally, so either forward slashes (`Z:/GodotClassroom`) or backslashes (`Z:\GodotClassroom`) are accepted.
 
 ### Common mapped-drive issues
 

@@ -498,7 +498,7 @@ func _normalize_server_path(path: String) -> String:
 	var trimmed := path.strip_edges()
 	# Detect UNC paths (\\server\share) before converting slashes.
 	var is_unc := trimmed.begins_with("\\\\") or trimmed.begins_with("//")
-	# Normalise to forward slashes for Godot's DirAccess / FileAccess.
+	# Normalize to forward slashes for Godot's DirAccess / FileAccess.
 	trimmed = trimmed.replace("\\", "/")
 	# Strip trailing slashes.
 	while trimmed.length() > 1 and trimmed.ends_with("/"):
