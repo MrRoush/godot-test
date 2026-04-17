@@ -37,6 +37,8 @@ var _advanced_nodes: Array = []
 var _teacher_nodes: Array = []
 var _pull_confirm_dialog: ConfirmationDialog
 var _clean_pull_confirm_dialog: ConfirmationDialog
+var _browse_assignments_button: Button
+var _assignment_popup: PopupMenu
 
 var _is_pushing := false
 var _server_path_locked := false
@@ -98,6 +100,11 @@ func _build_ui() -> void:
 	_add_label(vbox, "PIN:")
 	_pin_input = _add_line_edit(vbox, "1234")
 	_pin_input.secret = true
+
+	_browse_assignments_button = Button.new()
+	_browse_assignments_button.text = "📋 Browse Assignments"
+	_browse_assignments_button.pressed.connect(_on_browse_assignments_pressed)
+	vbox.add_child(_browse_assignments_button)
 
 	var auto_save_label := _add_label(vbox, "Auto-Save:")
 	_auto_save_option = OptionButton.new()
@@ -203,6 +210,10 @@ func _build_ui() -> void:
 	_clean_pull_confirm_dialog.confirmed.connect(_on_clean_pull_confirmed)
 	add_child(_clean_pull_confirm_dialog)
 
+	_assignment_popup = PopupMenu.new()
+	_assignment_popup.id_pressed.connect(_on_assignment_selected)
+	add_child(_assignment_popup)
+
 	for node in _advanced_nodes:
 		node.visible = false
 
@@ -295,6 +306,8 @@ func _deobfuscate_pin(obfuscated: String) -> String:
 
 
 func _load_classroom_config() -> void:
+	if not FileAccess.file_exists(_CLASSROOM_CONFIG_PATH):
+		return
 	var config := ConfigFile.new()
 	if config.load(_CLASSROOM_CONFIG_PATH) != OK:
 		return
@@ -308,6 +321,7 @@ func _load_classroom_config() -> void:
 		_assignment_input.text = assignment_name
 		_assignment_input.editable = false
 		_assignment_locked = true
+		_browse_assignments_button.visible = false
 
 
 func _save_settings() -> void:
@@ -362,6 +376,34 @@ func _on_sign_out_pressed() -> void:
 	_repo_tree.clear()
 	_save_settings()
 	_set_status("ℹ️ [color=yellow]Signed out. Enter your name and PIN to continue.[/color]")
+	_update_connected_label()
+
+
+func _on_browse_assignments_pressed() -> void:
+	var server_path := _normalize_server_path(_server_path_input.text)
+	if server_path.is_empty():
+		_set_status("❌ [color=red]No server path configured. Ask your teacher to set up classroom_config.cfg, or enable Advanced Options to enter the server path.[/color]")
+		return
+	if not DirAccess.dir_exists_absolute(server_path):
+		_set_status("❌ [color=red]Server path is not reachable: %s[/color]" % server_path)
+		return
+	var assignments := _list_assignments(server_path)
+	if assignments.is_empty():
+		_set_status("⚠️ [color=yellow]No assignments found on the server (folders with a _template subfolder).[/color]")
+		return
+	_assignment_popup.clear()
+	for i in range(assignments.size()):
+		_assignment_popup.add_item(str(assignments[i]), i)
+	_assignment_popup.popup_centered()
+
+
+func _on_assignment_selected(id: int) -> void:
+	if _assignment_locked:
+		return
+	var text := _assignment_popup.get_item_text(id)
+	_assignment_input.text = text
+	_save_settings()
+	_set_status("✅ [color=green]Assignment selected: %s[/color]" % text)
 	_update_connected_label()
 
 
@@ -523,6 +565,57 @@ func _validate_server_assignment() -> bool:
 	return true
 
 
+## Parses a simple INI-style file without using ConfigFile, so that Godot's
+## engine never prints parse-error messages that could expose sensitive values
+## such as the teacher PIN.  Supports [sections], key = value pairs, and
+## ; or # comment lines.  Returns {"ok": bool, "sections": {name: {key: value}}}.
+func _parse_ini_file(path: String) -> Dictionary:
+	var result := {"ok": false, "sections": {}}
+	var file := FileAccess.open(path, FileAccess.READ)
+	if file == null:
+		return result
+	var current_section := ""
+	while not file.eof_reached():
+		var line: String = file.get_line().strip_edges()
+		if line.is_empty() or line.begins_with(";") or line.begins_with("#"):
+			continue
+		if line.begins_with("["):
+			var bracket_end := line.find("]")
+			if bracket_end > 1:
+				current_section = line.substr(1, bracket_end - 1).strip_edges()
+				if not result["sections"].has(current_section):
+					result["sections"][current_section] = {}
+		elif "=" in line and not current_section.is_empty():
+			var eq_idx := line.find("=")
+			var key := line.substr(0, eq_idx).strip_edges()
+			var value := line.substr(eq_idx + 1).strip_edges()
+			result["sections"][current_section][key] = value
+	file.close()
+	result["ok"] = true
+	return result
+
+
+## Returns a sorted list of assignment folder names found directly inside
+## server_path.  Only folders that contain a _template subfolder are included,
+## since that is the marker that distinguishes an assignment from a stray dir.
+func _list_assignments(server_path: String) -> Array:
+	var results: Array = []
+	var dir := DirAccess.open(server_path)
+	if dir == null:
+		return results
+	dir.list_dir_begin()
+	var entry := dir.get_next()
+	while not entry.is_empty():
+		if dir.current_is_dir() and not entry.begins_with("."):
+			var template_path := server_path.path_join(entry).path_join("_template")
+			if DirAccess.dir_exists_absolute(template_path):
+				results.append(entry)
+		entry = dir.get_next()
+	dir.list_dir_end()
+	results.sort()
+	return results
+
+
 func _verify_pin() -> bool:
 	var student_name := _name_input.text.strip_edges()
 	if student_name.is_empty():
@@ -538,20 +631,21 @@ func _verify_pin() -> bool:
 		_set_status("⚠️ [color=yellow]students.cfg was not found. Saving is still allowed.[/color]")
 		return true
 
-	var config := ConfigFile.new()
-	if config.load(students_cfg_path) != OK:
-		_set_status("❌ [color=red]Could not read students.cfg at %s[/color]" % students_cfg_path)
+	var parsed := _parse_ini_file(students_cfg_path)
+	if not parsed["ok"]:
+		_set_status("❌ [color=red]Could not read students.cfg — check the file format (it must use Godot INI format with a [students] section).[/color]")
 		return false
-	if not config.has_section("students"):
+	var sections: Dictionary = parsed["sections"]
+	if not sections.has("students"):
 		_set_status("❌ [color=red]students.cfg is missing a [students] section.[/color]")
 		return false
 
-	for key in config.get_section_keys("students"):
+	for key in sections["students"]:
 		if str(key).to_lower() == student_name.to_lower():
-			if str(config.get_value("students", key, "")).strip_edges() == entered_pin:
+			if str(sections["students"][key]).strip_edges() == entered_pin:
 				return true
 			break
-	_set_status("❌ [color=red]❌ Wrong name or PIN — ask your teacher to check students.cfg[/color]")
+	_set_status("❌ [color=red]Wrong name or PIN — ask your teacher to check students.cfg[/color]")
 	return false
 
 
@@ -571,16 +665,16 @@ func _verify_teacher_pin() -> bool:
 		_set_status("❌ [color=red]students.cfg not found — cannot verify teacher PIN: %s[/color]" % students_cfg_path)
 		return false
 
-	var config := ConfigFile.new()
-	if config.load(students_cfg_path) != OK:
-		_set_status("❌ [color=red]Could not read students.cfg at %s[/color]" % students_cfg_path)
+	var parsed := _parse_ini_file(students_cfg_path)
+	if not parsed["ok"]:
+		_set_status("❌ [color=red]Could not read students.cfg — check the file format (it must use Godot INI format with a [teacher] section).[/color]")
 		return false
-
-	if not config.has_section("teacher"):
+	var sections: Dictionary = parsed["sections"]
+	if not sections.has("teacher"):
 		_set_status("❌ [color=red]students.cfg is missing a [teacher] section with a PIN.[/color]")
 		return false
 
-	var expected_pin := str(config.get_value("teacher", "pin", "")).strip_edges()
+	var expected_pin := str(sections["teacher"].get("pin", "")).strip_edges()
 	if expected_pin.is_empty():
 		_set_status("❌ [color=red]No teacher PIN is set in students.cfg.[/color]")
 		return false
