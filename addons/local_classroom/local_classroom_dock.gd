@@ -18,6 +18,7 @@ var _server_path_input: LineEdit
 var _assignment_input: LineEdit
 var _name_input: LineEdit
 var _pin_input: LineEdit
+var _teacher_pin_input: LineEdit
 var _auto_save_option: OptionButton
 var _save_button: Button
 var _sign_out_button: Button
@@ -41,6 +42,7 @@ var _is_pushing := false
 var _server_path_locked := false
 var _assignment_locked := false
 var _loaded_students: Array = []
+var _teacher_authenticated := false
 
 
 func _ready() -> void:
@@ -77,8 +79,13 @@ func _build_ui() -> void:
 	vbox.add_child(_role_option)
 	_advanced_nodes.append_array([role_label, _role_option])
 
+	var teacher_pin_label := _add_label(vbox, "Teacher PIN:")
+	_teacher_pin_input = _add_line_edit(vbox, "Teacher PIN")
+	_teacher_pin_input.secret = true
+	_teacher_nodes.append_array([teacher_pin_label, _teacher_pin_input])
+
 	var server_label := _add_label(vbox, "Server Path:")
-	_server_path_input = _add_line_edit(vbox, "\\\\SERVER\\GodotClassroom")
+	_server_path_input = _add_line_edit(vbox, "\\\\SERVER\\GodotClassroom or Z:\\GodotClassroom")
 	_advanced_nodes.append_array([server_label, _server_path_input])
 
 	var assignment_label := _add_label(vbox, "Assignment:")
@@ -349,6 +356,8 @@ func _on_save_pressed() -> void:
 func _on_sign_out_pressed() -> void:
 	_name_input.text = ""
 	_pin_input.text = ""
+	_teacher_pin_input.text = ""
+	_teacher_authenticated = false
 	_loaded_students.clear()
 	_repo_tree.clear()
 	_save_settings()
@@ -360,7 +369,7 @@ func _on_load_students_pressed() -> void:
 	if _role_option.selected != ROLE_TEACHER:
 		_set_status("❌ [color=red]Teacher role is required to load students.[/color]")
 		return
-	if not _validate_server_assignment():
+	if not _verify_teacher_pin():
 		return
 	_set_buttons_enabled(false)
 	await _do_load_students()
@@ -380,6 +389,8 @@ func _on_pull_pressed() -> void:
 	if not _validate_server_assignment():
 		return
 	if _role_option.selected == ROLE_TEACHER:
+		if not _verify_teacher_pin():
+			return
 		var selected := _repo_tree.get_selected()
 		if selected != null:
 			var meta = selected.get_metadata(0)
@@ -433,6 +444,8 @@ func _on_auto_save_mode_changed(_idx: int) -> void:
 
 func _on_role_changed(_idx: int) -> void:
 	var show_teacher := _role_option.selected == ROLE_TEACHER
+	if not show_teacher:
+		_teacher_authenticated = false
 	for node in _teacher_nodes:
 		node.visible = show_teacher
 
@@ -483,8 +496,16 @@ func _update_auto_save_mode_label() -> void:
 
 func _normalize_server_path(path: String) -> String:
 	var trimmed := path.strip_edges()
-	while trimmed.ends_with("/") or trimmed.ends_with("\\"):
+	# Detect UNC paths (\\server\share) before converting slashes.
+	var is_unc := trimmed.begins_with("\\\\") or trimmed.begins_with("//")
+	# Normalize to forward slashes for Godot's DirAccess / FileAccess.
+	trimmed = trimmed.replace("\\", "/")
+	# Strip trailing slashes.
+	while trimmed.length() > 1 and trimmed.ends_with("/"):
 		trimmed = trimmed.substr(0, trimmed.length() - 1)
+	# Restore the UNC double-slash prefix that Godot requires on Windows.
+	if is_unc and not trimmed.begins_with("//"):
+		trimmed = "/" + trimmed
 	return trimmed
 
 
@@ -494,7 +515,7 @@ func _validate_server_assignment() -> bool:
 		_set_status("❌ [color=red]Please enter a server path.[/color]")
 		return false
 	if not DirAccess.dir_exists_absolute(server_path):
-		_set_status("❌ [color=red]Server path is not reachable or does not exist: %s[/color]" % server_path)
+		_set_status("❌ [color=red]Server path is not reachable or does not exist: %s\nBoth UNC paths (\\\\SERVER\\Share) and mapped drives (Z:\\Folder) are supported.[/color]" % server_path)
 		return false
 	if _assignment_input.text.strip_edges().is_empty():
 		_set_status("❌ [color=red]Please enter an assignment name.[/color]")
@@ -532,6 +553,44 @@ func _verify_pin() -> bool:
 			break
 	_set_status("❌ [color=red]❌ Wrong name or PIN — ask your teacher to check students.cfg[/color]")
 	return false
+
+
+func _verify_teacher_pin() -> bool:
+	if _teacher_authenticated:
+		return true
+	if not _validate_server_assignment():
+		return false
+
+	var entered_pin := _teacher_pin_input.text.strip_edges()
+	if entered_pin.is_empty():
+		_set_status("❌ [color=red]Please enter the teacher PIN.[/color]")
+		return false
+
+	var students_cfg_path := _normalize_server_path(_server_path_input.text).path_join("students.cfg")
+	if not FileAccess.file_exists(students_cfg_path):
+		_set_status("❌ [color=red]students.cfg not found — cannot verify teacher PIN: %s[/color]" % students_cfg_path)
+		return false
+
+	var config := ConfigFile.new()
+	if config.load(students_cfg_path) != OK:
+		_set_status("❌ [color=red]Could not read students.cfg at %s[/color]" % students_cfg_path)
+		return false
+
+	if not config.has_section("teacher"):
+		_set_status("❌ [color=red]students.cfg is missing a [teacher] section with a PIN.[/color]")
+		return false
+
+	var expected_pin := str(config.get_value("teacher", "pin", "")).strip_edges()
+	if expected_pin.is_empty():
+		_set_status("❌ [color=red]No teacher PIN is set in students.cfg.[/color]")
+		return false
+
+	if entered_pin != expected_pin:
+		_set_status("❌ [color=red]Incorrect teacher PIN.[/color]")
+		return false
+
+	_teacher_authenticated = true
+	return true
 
 
 func _do_push() -> void:
